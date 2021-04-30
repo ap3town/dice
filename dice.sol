@@ -1,5 +1,19 @@
 pragma solidity ^0.4.24;
 
+
+interface IBEP20 {
+    function totalSupply() external view returns (uint256);
+    function balanceOf(address tokenOwner) external view returns (uint256 balance);
+    function allowance(address tokenOwner, address spender) external view returns (uint256 remaining);
+    function transfer(address to, uint256 tokens) external returns (bool success);
+    function approve(address spender, uint256 tokens) external returns (bool success);
+    function transferFrom(address from, address to, uint256 tokens) external returns (bool success);
+    function burnTokens(uint256 _amount) external;
+    event Transfer(address indexed from, address indexed to, uint256 tokens);
+    event Approval(address indexed tokenOwner, address indexed spender, uint256 tokens);
+}
+
+
 // * dice2.win - fair games that pay Ether. Version 5.
 //
 // * Ethereum smart contract, deployed at 0xD1CEeeeee83F8bCF3BEDad437202b6154E9F5405.
@@ -10,7 +24,7 @@ pragma solidity ^0.4.24;
 //
 // * Refer to https://dice2.win/whitepaper.pdf for detailed description and proofs.
 
-contract Dice2Win {
+contract AP3dice {
     /// *** Constants section
 
     // Each bet is deducted 1% in favour of the house, but no less than some minimum.
@@ -108,6 +122,9 @@ contract Dice2Win {
 
     // Croupier account.
     address public croupier;
+    
+    // AP3 token address
+    address constant public TOKEN = 0xe459c0b11c62e3fD83da52537BD6191B56aB1b5A;
 
     // Events that are issued to make statistic recovery easier.
     event FailedPayment(address indexed beneficiary, uint amount);
@@ -147,10 +164,6 @@ contract Dice2Win {
         owner = nextOwner;
     }
 
-    // Fallback function deliberately left empty. It's primary use case
-    // is to top up the bank roll.
-    function () public payable {
-    }
 
     // See comment for "secretSigner" variable.
     function setSecretSigner(address newSecretSigner) external onlyOwner {
@@ -170,24 +183,18 @@ contract Dice2Win {
 
     // This function is used to bump up the jackpot fund. Cannot be used to lower it.
     function increaseJackpot(uint increaseAmount) external onlyOwner {
-        require (increaseAmount <= address(this).balance, "Increase amount larger than balance.");
-        require (jackpotSize + lockedInBets + increaseAmount <= address(this).balance, "Not enough funds.");
+        require (increaseAmount <= IBEP20(TOKEN).balanceOf(address(this)), "Increase amount larger than balance.");
+        require (jackpotSize + lockedInBets + increaseAmount <= IBEP20(TOKEN).balanceOf(address(this)), "Not enough funds.");
         jackpotSize += uint128(increaseAmount);
     }
 
-    // Funds withdrawal to cover costs of dice2.win operation.
+    // Funds withdrawal to cover costs of AP3 operation.
     function withdrawFunds(address beneficiary, uint withdrawAmount) external onlyOwner {
-        require (withdrawAmount <= address(this).balance, "Increase amount larger than balance.");
-        require (jackpotSize + lockedInBets + withdrawAmount <= address(this).balance, "Not enough funds.");
+        require (withdrawAmount <= IBEP20(TOKEN).balanceOf(address(this)), "Increase amount larger than balance.");
+        require (jackpotSize + lockedInBets + withdrawAmount <= IBEP20(TOKEN).balanceOf(address(this)), "Not enough funds.");
         sendFunds(beneficiary, withdrawAmount, withdrawAmount);
     }
 
-    // Contract may be destroyed only when there are no ongoing bets,
-    // either settled or refunded. All funds are transferred to contract owner.
-    function kill() external onlyOwner {
-        require (lockedInBets == 0, "All bets should be processed (settled or refunded) before self-destruct.");
-        selfdestruct(owner);
-    }
 
     /// *** Betting logic
 
@@ -205,7 +212,7 @@ contract Dice2Win {
     //  modulo          - game modulo.
     //  commitLastBlock - number of the maximum block where "commit" is still considered valid.
     //  commit          - Keccak256 hash of some secret "reveal" random number, to be supplied
-    //                    by the dice2.win croupier bot in the settleBet transaction. Supplying
+    //                    by the AP3 croupier bot in the settleBet transaction. Supplying
     //                    "commit" ensures that "reveal" cannot be changed behind the scenes
     //                    after placeBet have been mined.
     //  r, s            - components of ECDSA signature of (commitLastBlock, commit). v is
@@ -218,13 +225,16 @@ contract Dice2Win {
     // it would be possible for a miner to place a bet with a known commit/reveal pair and tamper
     // with the blockhash. Croupier guarantees that commitLastBlock will always be not greater than
     // placeBet block number plus BET_EXPIRATION_BLOCKS. See whitepaper for details.
-    function placeBet(uint betMask, uint modulo, uint commitLastBlock, uint commit, bytes32 r, bytes32 s) external payable {
+    function placeBet( uint tokens, uint betMask, uint modulo, uint commitLastBlock, uint commit, bytes32 r, bytes32 s) external {
         // Check that the bet is in 'clean' state.
+        uint _amount = tokens;
+        require(IBEP20(TOKEN).transferFrom(msg.sender, address(this), _amount), "Tokens cannot be transferred from user account");
+        
         Bet storage bet = bets[commit];
         require (bet.gambler == address(0), "Bet should be in a 'clean' state.");
-
+        
         // Validate input data ranges.
-        uint amount = msg.value;
+        uint amount = div(mul(_amount, 96), 100);
         require (modulo > 1 && modulo <= MAX_MODULO, "Modulo should be within range.");
         require (amount >= MIN_BET && amount <= MAX_AMOUNT, "Amount should be within range.");
         require (betMask > 0 && betMask < MAX_BET_MASK, "Mask should be within range.");
@@ -266,7 +276,7 @@ contract Dice2Win {
         jackpotSize += uint128(jackpotFee);
 
         // Check whether contract has enough funds to process this bet.
-        require (jackpotSize + lockedInBets <= address(this).balance, "Cannot afford to lose this bet.");
+        require (jackpotSize + lockedInBets <= IBEP20(TOKEN).balanceOf(address(this)), "Cannot afford to lose this bet.");
 
         // Record commit in logs.
         emit Commit(commit);
@@ -280,6 +290,24 @@ contract Dice2Win {
         bet.gambler = msg.sender;
     }
 
+
+    function mul(uint a, uint b) internal pure returns (uint) {
+        if (a == 0) {
+            return 0;
+        }
+
+        uint256 c = a * b;
+        require(c / a == b, "SafeMath: multiplication overflow");
+
+        return c;
+    }
+
+    function div(uint a, uint b) internal pure returns (uint) {
+        require(b > 0, "SafeMath: division by zero");
+        uint256 c = a / b;
+        return c;
+    }
+    
     // This is the method used to settle 99% of bets. To process a bet with a specific
     // "commit", settleBet should supply a "reveal" number that would Keccak256-hash to
     // "commit". "blockHash" is the block hash of placeBet block as seen by croupier; it
@@ -325,7 +353,7 @@ contract Dice2Win {
         // Settle bet using reveal and uncleHash as entropy sources.
         settleBetCommon(bet, reveal, uncleHash);
     }
-
+    
     // Common settlement code for settleBet & settleBetUncleMerkleProof.
     function settleBetCommon(Bet storage bet, uint reveal, bytes32 entropyBlockHash) private {
         // Fetch bet parameters into local variables (to save gas).
@@ -393,13 +421,13 @@ contract Dice2Win {
         }
 
         // Send the funds to gambler.
-        sendFunds(gambler, diceWin + jackpotWin == 0 ? 1 wei : diceWin + jackpotWin, diceWin);
+        sendFunds(gambler, diceWin + jackpotWin == 0 ? 100 wei : diceWin + jackpotWin, diceWin);
     }
 
     // Refund transaction - return the bet amount of a roll that was not processed in a
     // due timeframe. Processing such blocks is not possible due to EVM limitations (see
     // BET_EXPIRATION_BLOCKS comment above for details). In case you ever find yourself
-    // in a situation like this, just contact the dice2.win support, however nothing
+    // in a situation like this, just contact the AP3 support, however nothing
     // precludes you from invoking this method yourself.
     function refundBet(uint commit) external {
         // Check that bet is in 'active' state.
@@ -443,10 +471,14 @@ contract Dice2Win {
 
     // Helper routine to process the payment.
     function sendFunds(address beneficiary, uint amount, uint successLogAmount) private {
-        if (beneficiary.send(amount)) {
+        if(amount > 100 wei){ // minimum 100 wei to make work fixed fee ( 4% => 4 x 1 wei )
+            if(IBEP20(TOKEN).transfer(beneficiary, amount)){
+                emit Payment(beneficiary, successLogAmount);
+            } else {
+                emit FailedPayment(beneficiary, amount);
+            }
+        }else{
             emit Payment(beneficiary, successLogAmount);
-        } else {
-            emit FailedPayment(beneficiary, amount);
         }
     }
 
